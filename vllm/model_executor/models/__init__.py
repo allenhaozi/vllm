@@ -10,9 +10,8 @@ from vllm.model_executor.models.gpt_neox import GPTNeoXForCausalLM
 from vllm.model_executor.models.internlm import InternLMForCausalLM
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.model_executor.models.mistral import MistralForCausalLM
-from vllm.model_executor.models.mpt import MPTForCausalLM
+from vllm.model_executor.models.mpt import MptForCausalLM
 from vllm.model_executor.models.opt import OPTForCausalLM
-from vllm.model_executor.models.phi_1_5 import PhiForCausalLM
 from vllm.model_executor.models.qwen import QWenLMHeadModel
 from vllm.model_executor.models.chatglm import ChatGLMForCausalLM
 from vllm.model_executor.models.yi import YiForCausalLM
@@ -30,9 +29,8 @@ __all__ = [
     "GPTNeoXForCausalLM",
     "InternLMForCausalLM",
     "LlamaForCausalLM",
-    "MPTForCausalLM",
+    "MptForCausalLM",
     "OPTForCausalLM",
-    "PhiForCausalLM",
     "QWenLMHeadModel",
     "MistralForCausalLM",
     "YiForCausalLM",

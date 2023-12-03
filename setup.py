@@ -2,13 +2,13 @@ import io
 import os
 import re
 import subprocess
-from typing import List, Set
 import warnings
+from typing import List, Set
 
-from packaging.version import parse, Version
 import setuptools
 import torch
-from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CUDA_HOME
+from packaging.version import Version, parse
+from torch.utils.cpp_extension import CUDA_HOME, BuildExtension, CUDAExtension
 
 ROOT_DIR = os.path.dirname(__file__)
 
@@ -28,7 +28,8 @@ NVCC_FLAGS += [f"-D_GLIBCXX_USE_CXX11_ABI={ABI}"]
 
 if CUDA_HOME is None:
     raise RuntimeError(
-        "Cannot find CUDA_HOME. CUDA must be available to build the package.")
+        "Cannot find CUDA_HOME. CUDA must be available to build the package."
+    )
 
 
 def get_nvcc_cuda_version(cuda_dir: str) -> Version:
@@ -36,8 +37,9 @@ def get_nvcc_cuda_version(cuda_dir: str) -> Version:
 
     Adapted from https://github.com/NVIDIA/apex/blob/8b7a1ff183741dd8f9b87e7bafd04cfde99cea28/setup.py
     """
-    nvcc_output = subprocess.check_output([cuda_dir + "/bin/nvcc", "-V"],
-                                          universal_newlines=True)
+    nvcc_output = subprocess.check_output(
+        [cuda_dir + "/bin/nvcc", "-V"], universal_newlines=True
+    )
     output = nvcc_output.split()
     release_idx = output.index("release") + 1
     nvcc_cuda_version = parse(output[release_idx].split(",")[0])
@@ -68,15 +70,16 @@ def get_torch_arch_list() -> Set[str]:
         raise RuntimeError(
             "None of the CUDA architectures in `TORCH_CUDA_ARCH_LIST` env "
             f"variable ({env_arch_list}) is supported. "
-            f"Supported CUDA architectures are: {valid_archs}.")
+            f"Supported CUDA architectures are: {valid_archs}."
+        )
     invalid_arch_list = torch_arch_list - valid_archs
     if invalid_arch_list:
         warnings.warn(
             f"Unsupported CUDA architectures ({invalid_arch_list}) are "
             "excluded from the `TORCH_CUDA_ARCH_LIST` env variable "
             f"({env_arch_list}). Supported CUDA architectures are: "
-            f"{valid_archs}.",
-            stacklevel=2)
+            f"{valid_archs}."
+        )
     return arch_list
 
 
@@ -90,7 +93,8 @@ if not compute_capabilities:
         major, minor = torch.cuda.get_device_capability(i)
         if major < 7:
             raise RuntimeError(
-                "GPUs with compute capability below 7.0 are not supported.")
+                "GPUs with compute capability below 7.0 are not supported."
+            )
         compute_capabilities.add(f"{major}.{minor}")
 
 nvcc_cuda_version = get_nvcc_cuda_version(CUDA_HOME)
@@ -107,10 +111,11 @@ if not compute_capabilities:
 # Validate the NVCC CUDA version.
 if nvcc_cuda_version < Version("11.0"):
     raise RuntimeError("CUDA 11.0 or higher is required to build the package.")
-if (nvcc_cuda_version < Version("11.1")
-        and any(cc.startswith("8.6") for cc in compute_capabilities)):
-    raise RuntimeError(
-        "CUDA 11.1 or higher is required for compute capability 8.6.")
+if nvcc_cuda_version < Version("11.1"):
+    if any(cc.startswith("8.6") for cc in compute_capabilities):
+        raise RuntimeError(
+            "CUDA 11.1 or higher is required for compute capability 8.6."
+        )
 if nvcc_cuda_version < Version("11.8"):
     if any(cc.startswith("8.9") for cc in compute_capabilities):
         # CUDA 11.8 is required to generate the code targeting compute capability 8.9.
@@ -120,14 +125,16 @@ if nvcc_cuda_version < Version("11.8"):
         # instead of 8.9.
         warnings.warn(
             "CUDA 11.8 or higher is required for compute capability 8.9. "
-            "Targeting compute capability 8.0 instead.",
-            stacklevel=2)
-        compute_capabilities = set(cc for cc in compute_capabilities
-                                   if not cc.startswith("8.9"))
+            "Targeting compute capability 8.0 instead."
+        )
+        compute_capabilities = set(
+            cc for cc in compute_capabilities if not cc.startswith("8.9")
+        )
         compute_capabilities.add("8.0+PTX")
     if any(cc.startswith("9.0") for cc in compute_capabilities):
         raise RuntimeError(
-            "CUDA 11.8 or higher is required for compute capability 9.0.")
+            "CUDA 11.8 or higher is required for compute capability 9.0."
+        )
 
 # Add target compute capabilities to NVCC flags.
 for capability in compute_capabilities:
@@ -142,25 +149,91 @@ if nvcc_cuda_version >= Version("11.2"):
     NVCC_FLAGS += ["--threads", str(num_threads)]
 
 ext_modules = []
-vllm_extension = CUDAExtension(
-    name="vllm._C",
+
+# Cache operations.
+cache_extension = CUDAExtension(
+    name="vllm.cache_ops",
+    sources=["csrc/cache.cpp", "csrc/cache_kernels.cu"],
+    extra_compile_args={
+        "cxx": CXX_FLAGS,
+        "nvcc": NVCC_FLAGS,
+    },
+)
+ext_modules.append(cache_extension)
+
+# Attention kernels.
+attention_extension = CUDAExtension(
+    name="vllm.attention_ops",
+    sources=["csrc/attention.cpp", "csrc/attention/attention_kernels.cu"],
+    extra_compile_args={
+        "cxx": CXX_FLAGS,
+        "nvcc": NVCC_FLAGS,
+    },
+)
+ext_modules.append(attention_extension)
+
+# Positional encoding kernels.
+positional_encoding_extension = CUDAExtension(
+    name="vllm.pos_encoding_ops",
+    sources=["csrc/pos_encoding.cpp", "csrc/pos_encoding_kernels.cu"],
+    extra_compile_args={
+        "cxx": CXX_FLAGS,
+        "nvcc": NVCC_FLAGS,
+    },
+)
+ext_modules.append(positional_encoding_extension)
+
+# Layer normalization kernels.
+layernorm_extension = CUDAExtension(
+    name="vllm.layernorm_ops",
+    sources=["csrc/layernorm.cpp", "csrc/layernorm_kernels.cu"],
+    extra_compile_args={
+        "cxx": CXX_FLAGS,
+        "nvcc": NVCC_FLAGS,
+    },
+)
+ext_modules.append(layernorm_extension)
+
+# Activation kernels.
+activation_extension = CUDAExtension(
+    name="vllm.activation_ops",
+    sources=["csrc/activation.cpp", "csrc/activation_kernels.cu"],
+    extra_compile_args={
+        "cxx": CXX_FLAGS,
+        "nvcc": NVCC_FLAGS,
+    },
+)
+ext_modules.append(activation_extension)
+
+# Quantization kernels.
+quantization_extension = CUDAExtension(
+    name="vllm.quantization_ops",
     sources=[
-        "csrc/cache_kernels.cu",
-        "csrc/attention/attention_kernels.cu",
-        "csrc/pos_encoding_kernels.cu",
-        "csrc/activation_kernels.cu",
-        "csrc/layernorm_kernels.cu",
+        "csrc/quantization.cpp",
         "csrc/quantization/awq/gemm_kernels.cu",
         "csrc/quantization/squeezellm/quant_cuda_kernel.cu",
-        "csrc/cuda_utils_kernels.cu",
-        "csrc/pybind.cpp",
+        "csrc/quantization/gptq/exllama_ext.cpp",
+        "csrc/quantization/gptq/q_matrix.cu",
+        "csrc/quantization/gptq/q_gemm.cu",
+        "csrc/quantization/gptq/old_matmul_kernel.cu",
     ],
     extra_compile_args={
         "cxx": CXX_FLAGS,
         "nvcc": NVCC_FLAGS,
     },
 )
-ext_modules.append(vllm_extension)
+ext_modules.append(quantization_extension)
+
+# Misc. CUDA utils.
+cuda_utils_extension = CUDAExtension(
+    name="vllm.cuda_utils",
+    sources=["csrc/cuda_utils.cpp", "csrc/cuda_utils_kernels.cu"],
+    extra_compile_args={
+        "cxx": CXX_FLAGS,
+        "nvcc": NVCC_FLAGS,
+    },
+)
+ext_modules.append(cuda_utils_extension)
 
 
 def get_path(*filepath) -> str:
@@ -173,8 +246,9 @@ def find_version(filepath: str) -> str:
     Adapted from https://github.com/ray-project/ray/blob/0b190ee1160eeca9796bc091e07eaebf4c85b511/python/setup.py
     """
     with open(filepath) as fp:
-        version_match = re.search(r"^__version__ = ['\"]([^'\"]*)['\"]",
-                                  fp.read(), re.M)
+        version_match = re.search(
+            r"^__version__ = ['\"]([^'\"]*)['\"]", fp.read(), re.M
+        )
         if version_match:
             return version_match.group(1)
         raise RuntimeError("Unable to find version string.")
@@ -210,8 +284,10 @@ setuptools.setup(
     version=get_vllm_version(),
     author="vLLM Team",
     license="Apache 2.0",
-    description=("A high-throughput and memory-efficient inference and "
-                 "serving engine for LLMs"),
+    description=(
+        "A high-throughput and memory-efficient inference and "
+        "serving engine for LLMs"
+    ),
     long_description=read_readme(),
     long_description_content_type="text/markdown",
     url="https://github.com/vllm-project/vllm",
@@ -227,8 +303,9 @@ setuptools.setup(
         "License :: OSI Approved :: Apache Software License",
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
     ],
-    packages=setuptools.find_packages(exclude=("benchmarks", "csrc", "docs",
-                                               "examples", "tests")),
+    packages=setuptools.find_packages(
+        exclude=("benchmarks", "csrc", "docs", "examples", "tests")
+    ),
     python_requires=">=3.8",
     install_requires=get_requirements(),
     ext_modules=ext_modules,

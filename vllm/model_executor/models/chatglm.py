@@ -1,31 +1,37 @@
 # coding=utf-8
 # Adapted from
 # https://github.com/THUDM/ChatGLM2-6B
-"""Inference-only ChatGLM model compatible with THUDM weights."""
-from typing import List, Optional, Tuple
+"""Inference-only ChatGLM model compatible with THUDM weights.
+
+The input of the model is flattened to a 1D tensor of tokens. The model uses
+InputMetadata to extract the original 2D shape of the input.
+"""
+from typing import Dict, List, Optional, Tuple
 
 import torch
 from torch import nn
 from torch.nn import LayerNorm
 
 from vllm.model_executor.input_metadata import InputMetadata
-from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.attention import PagedAttention
+from vllm.model_executor.layers.attention import PagedAttentionWithRoPE
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (LinearMethodBase,
-                                               MergedColumnParallelLinear,
-                                               QKVParallelLinear,
-                                               RowParallelLinear)
-from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.sampler import Sampler
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding, ParallelLMHead)
+from vllm.model_executor.quantization_utils import QuantizationConfig
+from vllm.model_executor.weight_utils import (
+    hf_model_weights_iterator,
+    load_tensor_parallel_weights,
+    convert_pyslice_to_tensor,
+    get_parallel_weight,
+)
 from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_world_size)
-from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.model_executor.weight_utils import (default_weight_loader,
-                                              hf_model_weights_iterator)
-from vllm.sequence import SamplerOutput
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+)
+from vllm.model_executor.parallel_utils.layers import VocabParallelEmbedding
+from vllm.model_executor.layers.quantized_linear import ParallelLinear
+from vllm.sequence import SequenceOutputs
+
 from vllm.transformers_utils.configs import ChatGLMConfig
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
@@ -33,11 +39,7 @@ KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 class GLMAttention(nn.Module):
 
-    def __init__(
-        self,
-        config,
-        linear_method: Optional[LinearMethodBase] = None,
-    ):
+    def __init__(self, config, quant_config=None):
         super().__init__()
         self.hidden_size = config.hidden_size
         tp_size = get_tensor_model_parallel_world_size()
@@ -48,50 +50,37 @@ class GLMAttention(nn.Module):
         self.total_num_kv_heads = (config.multi_query_group_num
                                    if config.multi_query_attention else
                                    config.num_attention_heads)
-        if self.total_num_kv_heads >= tp_size:
-            # Number of KV heads is greater than TP size, so we partition
-            # the KV heads across multiple tensor parallel GPUs.
-            assert self.total_num_kv_heads % tp_size == 0
-        else:
-            # Number of KV heads is less than TP size, so we replicate
-            # the KV heads across multiple tensor parallel GPUs.
-            assert tp_size % self.total_num_kv_heads == 0
-        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
+        assert self.total_num_kv_heads % tp_size == 0
+        self.num_kv_heads = self.total_num_kv_heads // tp_size
         self.head_dim = config.hidden_size // self.total_num_heads
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
 
-        self.query_key_value = QKVParallelLinear(
-            self.hidden_size,
+        self.query_key_value = ParallelLinear.column(
+            config.hidden_size,
+            (self.total_num_heads + 2 * self.total_num_kv_heads) *
             self.head_dim,
-            self.total_num_heads,
-            self.total_num_kv_heads,
-            bias=config.add_bias_linear or config.add_qkv_bias,
-            linear_method=linear_method,
+            bias=config.add_qkv_bias,
+            gather_output=False,
+            quant_config=quant_config,
         )
-        self.dense = RowParallelLinear(
+        self.dense = ParallelLinear.row(
             self.total_num_heads * self.head_dim,
             config.hidden_size,
             bias=config.add_bias_linear,
-            linear_method=linear_method,
+            input_is_parallel=True,
+            quant_config=quant_config,
         )
 
-        # https://huggingface.co/THUDM/chatglm3-6b-32k/blob/e210410255278dd9d74463cf396ba559c0ef801c/modeling_chatglm.py#L141
-        rope_ratio = getattr(config, "rope_ratio", 1.0)
-        max_positions = getattr(config, "seq_length", 8192)
-        self.rotary_emb = get_rope(
-            self.head_dim,
-            rotary_dim=self.head_dim // 2,
-            max_position=max_positions,
-            base=10000 * rope_ratio,
-            is_neox_style=False,
-        )
-        self.attn = PagedAttention(
+        self.attn = PagedAttentionWithRoPE(
             self.num_heads,
             self.head_dim,
             self.scaling,
+            rotary_dim=self.head_dim // 2,
             num_kv_heads=self.num_kv_heads,
+            is_neox_style=False,
+            # is_glm_style=True
         )
 
     def forward(
@@ -104,9 +93,10 @@ class GLMAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.query_key_value(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q, k = self.rotary_emb(position_ids, q, k)
         key_cache, value_cache = kv_cache
+
         context_layer = self.attn(
+            position_ids,
             q,
             k,
             v,
@@ -115,7 +105,9 @@ class GLMAttention(nn.Module):
             input_metadata,
             cache_event,
         )
+
         attn_output, _ = self.dense(context_layer)
+
         return attn_output
 
 
@@ -127,31 +119,29 @@ class GLMMLP(nn.Module):
     state back into h hidden dimension.
     """
 
-    def __init__(
-        self,
-        config,
-        linear_method: Optional[LinearMethodBase] = None,
-    ):
+    def __init__(self, config, quant_config=None):
         super().__init__()
 
         self.add_bias = config.add_bias_linear
 
         # Project to 4h.
-        self.dense_h_to_4h = MergedColumnParallelLinear(
+        self.dense_h_to_4h = ParallelLinear.column(
             config.hidden_size,
-            [config.ffn_hidden_size] * 2,
+            config.ffn_hidden_size * 2,
             bias=config.add_bias_linear,
-            linear_method=linear_method,
+            gather_output=False,
+            quant_config=quant_config,
         )
 
         self.activation_func = SiluAndMul()
 
         # Project back to h.
-        self.dense_4h_to_h = RowParallelLinear(
+        self.dense_4h_to_h = ParallelLinear.row(
             config.ffn_hidden_size,
             config.hidden_size,
             bias=config.add_bias_linear,
-            linear_method=linear_method,
+            input_is_parallel=True,
+            quant_config=quant_config,
         )
 
     def forward(self, hidden_states):
@@ -173,7 +163,7 @@ class GLMBlock(nn.Module):
     def __init__(
         self,
         config,
-        linear_method: Optional[LinearMethodBase] = None,
+        quant_config=None,
     ):
         super().__init__()
         self.apply_residual_connection_post_layernorm = (
@@ -187,7 +177,7 @@ class GLMBlock(nn.Module):
                                                eps=config.layernorm_epsilon)
 
         # Self attention.
-        self.self_attention = GLMAttention(config, linear_method)
+        self.self_attention = GLMAttention(config, quant_config)
         self.hidden_dropout = config.hidden_dropout
 
         # Layernorm on the attention output
@@ -195,7 +185,7 @@ class GLMBlock(nn.Module):
             config.hidden_size, eps=config.layernorm_epsilon)
 
         # MLP
-        self.mlp = GLMMLP(config, linear_method)
+        self.mlp = GLMMLP(config, quant_config)
 
     def forward(
         self,
@@ -242,11 +232,7 @@ class GLMBlock(nn.Module):
 class GLMTransformer(nn.Module):
     """Transformer class."""
 
-    def __init__(
-        self,
-        config,
-        linear_method: Optional[LinearMethodBase] = None,
-    ):
+    def __init__(self, config, quant_config=None):
         super().__init__()
         self.post_layer_norm = config.post_layer_norm
 
@@ -255,7 +241,7 @@ class GLMTransformer(nn.Module):
 
         # Transformer layers.
         self.layers = nn.ModuleList(
-            [GLMBlock(config, linear_method) for i in range(self.num_layers)])
+            [GLMBlock(config, quant_config) for i in range(self.num_layers)])
 
         if self.post_layer_norm:
             layer_norm_func = RMSNorm if config.rmsnorm else LayerNorm
@@ -272,7 +258,10 @@ class GLMTransformer(nn.Module):
         cache_events: Optional[List[torch.cuda.Event]],
     ) -> torch.Tensor:
         for i in range(self.num_layers):
-            cache_event = None if cache_events is None else cache_events[i]
+            if cache_events is None:
+                cache_event = None
+            else:
+                cache_event = cache_events[i]
             layer = self.layers[i]
             hidden_states = layer(
                 hidden_states=hidden_states,
@@ -290,11 +279,7 @@ class GLMTransformer(nn.Module):
 
 class ChatGLMModel(nn.Module):
 
-    def __init__(
-        self,
-        config,
-        linear_method: Optional[LinearMethodBase] = None,
-    ):
+    def __init__(self, config, quant_config=None):
         super().__init__()
 
         self.embedding = VocabParallelEmbedding(config.padded_vocab_size,
@@ -303,10 +288,15 @@ class ChatGLMModel(nn.Module):
         self.num_layers = config.num_layers
         self.multi_query_group_num = config.multi_query_group_num
         self.kv_channels = config.kv_channels
-        self.encoder = GLMTransformer(config, linear_method)
+        self.encoder = GLMTransformer(config, quant_config)
 
-        self.output_layer = ParallelLMHead(config.padded_vocab_size,
-                                           config.hidden_size)
+        self.output_layer = ParallelLinear.column(
+            config.hidden_size,
+            config.padded_vocab_size,
+            bias=False,
+            gather_output=False,
+            params_dtype=config.torch_dtype,
+        )
 
     def forward(
         self,
@@ -332,15 +322,13 @@ class ChatGLMModel(nn.Module):
 
 class ChatGLMForCausalLM(nn.Module):
 
-    def __init__(
-        self,
-        config: ChatGLMConfig,
-        linear_method: Optional[LinearMethodBase] = None,
-    ):
+    def __init__(self,
+                 config: ChatGLMConfig,
+                 quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
         self.config: ChatGLMConfig = config
-        self.linear_method = linear_method
-        self.transformer = ChatGLMModel(config, linear_method)
+        self.quant_config = quant_config
+        self.transformer = ChatGLMModel(config, quant_config)
         self.lm_head_weight = self.transformer.output_layer.weight
         self.sampler = Sampler(config.padded_vocab_size)
 
@@ -351,33 +339,101 @@ class ChatGLMForCausalLM(nn.Module):
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
         cache_events: Optional[List[torch.cuda.Event]],
-    ) -> torch.Tensor:
+    ) -> Dict[int, SequenceOutputs]:
         hidden_states = self.transformer(input_ids, positions, kv_caches,
                                          input_metadata, cache_events)
-        return hidden_states
-
-    def sample(
-        self,
-        hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> SamplerOutput:
         next_tokens = self.sampler(self.lm_head_weight, hidden_states,
-                                   sampling_metadata)
+                                   input_metadata)
         return next_tokens
 
-    def load_weights(self,
-                     model_name_or_path: str,
-                     cache_dir: Optional[str] = None,
-                     load_format: str = "auto",
-                     revision: Optional[str] = None):
-        params_dict = dict(self.named_parameters(remove_duplicate=False))
+    column_parallel_layers = []
+    row_parallel_layers = ["dense_4h_to_h", "dense"]
+    parallel_vocab_layers = ["output_layer", "embedding"]
+
+    def load_weights(
+        self,
+        model_name_or_path: str,
+        cache_dir: Optional[str] = None,
+        load_format: str = "auto",
+        revision: Optional[str] = None,
+    ):
+        column_parallel_weights, row_parallel_weights = get_parallel_weight(
+            self)
+        column_weight_suffixes = (
+            self.quant_config.get_col_parallel_tensor_names()
+        ) if self.quant_config is not None else ["weight", "bias"]
+        tp_rank = get_tensor_model_parallel_rank()
+        tp_size = get_tensor_model_parallel_world_size()
+
+        state_dict = self.state_dict()
         for name, loaded_weight in hf_model_weights_iterator(
                 model_name_or_path, cache_dir, load_format, revision):
-            if "rotary_pos_emb.inv_freq" in name:
-                continue
+            packed_dim = None
+            is_transposed = False
+            if self.quant_config is not None:
+                packed_dim = self.quant_config.get_packed_dim(name)
+                is_transposed = self.quant_config.is_transposed(name)
+            if is_transposed:
+                loaded_weight = convert_pyslice_to_tensor(loaded_weight)
+                loaded_weight = loaded_weight.T
+            q_proj_shard_size = self.config.hidden_size // tp_size
+            kv_proj_shard_size = (self.config.hidden_size //
+                                  self.config.num_attention_heads *
+                                  self.config.multi_query_group_num // tp_size)
+
+            mlp_hidden_shard_size = self.config.ffn_hidden_size // tp_size
+
+            if packed_dim is not None:
+                shard_dim = 0 if not is_transposed else 1
+                if packed_dim == shard_dim:
+                    q_proj_shard_size //= self.quant_config.pack_factor
+                    kv_proj_shard_size //= self.quant_config.pack_factor
+                    mlp_hidden_shard_size //= self.quant_config.pack_factor
             if "word_embeddings" in name:
                 name = name.replace(".word_embeddings", "")
-            param = params_dict[name]
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            weight_loader(param, loaded_weight)
+
+            if name in state_dict:
+                param = state_dict[name]
+                if is_transposed:
+                    param = param.T
+
+                if "query_key_value" in name and any(
+                        name.endswith(suffix)
+                        for suffix in column_weight_suffixes):
+
+                    q_offset = q_proj_shard_size * tp_rank
+                    k_offset = (q_proj_shard_size * tp_size +
+                                kv_proj_shard_size * tp_rank)
+                    v_offset = (q_proj_shard_size * tp_size +
+                                kv_proj_shard_size * (tp_size + tp_rank))
+                    wq = loaded_weight[q_offset:q_offset + q_proj_shard_size]
+                    wk = loaded_weight[k_offset:k_offset + kv_proj_shard_size]
+                    wv = loaded_weight[v_offset:v_offset + kv_proj_shard_size]
+                    loaded_weight = torch.cat([wq, wk, wv], dim=0)
+                    param.data.copy_(loaded_weight)
+                    continue
+
+                if "dense_h_to_4h" in name and any(
+                        name.endswith(suffix)
+                        for suffix in column_weight_suffixes):
+                    w_gate = loaded_weight[mlp_hidden_shard_size *
+                                           tp_rank:mlp_hidden_shard_size *
+                                           (tp_rank + 1)]
+                    w_proj = loaded_weight[mlp_hidden_shard_size *
+                                           (tp_size +
+                                            tp_rank):mlp_hidden_shard_size *
+                                           (tp_size + tp_rank + 1)]
+                    loaded_weight = torch.cat([w_gate, w_proj], dim=0)
+                    param.data.copy_(loaded_weight)
+                    continue
+
+                load_tensor_parallel_weights(
+                    param,
+                    loaded_weight,
+                    name,
+                    column_parallel_weights,
+                    row_parallel_weights,
+                    tp_rank,
+                )
+            else:
+                continue
