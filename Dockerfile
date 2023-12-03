@@ -1,7 +1,13 @@
 FROM nvidia/cuda:12.1.0-devel-ubuntu22.04 AS dev
 
+RUN sed -i 's/archive.ubuntu.com/mirrors4.tuna.tsinghua.edu.cn/' /etc/apt/sources.list \
+    && sed -i 's/security.ubuntu.com/mirrors4.tuna.tsinghua.edu.cn/' /etc/apt/sources.list \
+    && sed -i 's/archive.canonical.com/mirrors4.tuna.tsinghua.edu.cn/' /etc/apt/sources.list
+
 RUN apt-get update -y \
     && apt-get install -y python3-pip
+
+RUN pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
 
 WORKDIR /workspace
 
@@ -17,11 +23,6 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 # image to build pytorch extensions
 FROM dev AS build
-
-# install build dependencies
-COPY requirements-build.txt requirements-build.txt
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -r requirements-build.txt
 
 # copy input files
 COPY csrc csrc
@@ -48,9 +49,15 @@ ENTRYPOINT ["python3", "-m", "pytest", "tests"]
 # use CUDA base as CUDA runtime dependencies are already installed via pip
 FROM nvidia/cuda:12.1.0-base-ubuntu22.04 AS vllm-base
 
+RUN sed -i 's/archive.ubuntu.com/mirrors4.tuna.tsinghua.edu.cn/' /etc/apt/sources.list \
+    && sed -i 's/security.ubuntu.com/mirrors4.tuna.tsinghua.edu.cn/' /etc/apt/sources.list \
+    && sed -i 's/archive.canonical.com/mirrors4.tuna.tsinghua.edu.cn/' /etc/apt/sources.list
+
 # libnccl required for ray
 RUN apt-get update -y \
     && apt-get install -y python3-pip
+
+RUN pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
 
 WORKDIR /workspace
 COPY requirements.txt requirements.txt
@@ -66,12 +73,24 @@ ENTRYPOINT ["python3", "-m", "vllm.entrypoints.api_server"]
 
 # openai api server alternative
 FROM vllm-base AS vllm-openai
+
+ENV DEBIAN_FRONTEND noninteractive
+
+RUN sed -i 's/archive.ubuntu.com/mirrors4.tuna.tsinghua.edu.cn/' /etc/apt/sources.list \
+    && sed -i 's/security.ubuntu.com/mirrors4.tuna.tsinghua.edu.cn/' /etc/apt/sources.list \
+    && sed -i 's/archive.canonical.com/mirrors4.tuna.tsinghua.edu.cn/' /etc/apt/sources.list
+
+ENV TZ=Asia/Shanghai
+RUN apt-get update \
+    && apt-get install -y ca-certificates tzdata \
+    && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime \
+    && echo $TZ > /etc/timezone
+
+RUN pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
+
 # install additional dependencies for openai api server
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install accelerate fschat
 
 COPY --from=build /workspace/vllm/*.so /workspace/vllm/
 COPY vllm vllm
-
-ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
-

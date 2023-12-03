@@ -19,10 +19,7 @@ Alongside each architecture, we include some popular models that use it.
     - :code:`BAAI/Aquila-7B`, :code:`BAAI/AquilaChat-7B`, etc.
   * - :code:`BaiChuanForCausalLM`
     - Baichuan
-    - :code:`baichuan-inc/Baichuan2-13B-Chat`, :code:`baichuan-inc/Baichuan-7B`, etc.
-  * - :code:`ChatGLMModel`
-    - ChatGLM
-    - :code:`THUDM/chatglm2-6b`, :code:`THUDM/chatglm3-6b`, etc.
+    - :code:`baichuan-inc/Baichuan-7B`, :code:`baichuan-inc/Baichuan-13B-Chat`, etc.
   * - :code:`BloomForCausalLM`
     - BLOOM, BLOOMZ, BLOOMChat
     - :code:`bigscience/bloom`, :code:`bigscience/bloomz`, etc.
@@ -56,15 +53,9 @@ Alongside each architecture, we include some popular models that use it.
   * - :code:`OPTForCausalLM`
     - OPT, OPT-IML
     - :code:`facebook/opt-66b`, :code:`facebook/opt-iml-max-30b`, etc.
-  * - :code:`PhiForCausalLM`
-    - Phi-1.5
-    - :code:`microsoft/phi-1_5`, etc.
   * - :code:`QWenLMHeadModel`
     - Qwen
     - :code:`Qwen/Qwen-7B`, :code:`Qwen/Qwen-7B-Chat`, etc.
-  * - :code:`YiForCausalLM`
-    - Yi
-    - :code:`01-ai/Yi-6B`, :code:`01-ai/Yi-34B`, etc.
 
 If your model uses one of the above model architectures, you can seamlessly run your model with vLLM.
 Otherwise, please refer to :ref:`Adding a New Model <adding_a_new_model>` for instructions on how to implement support for your model.
@@ -78,20 +69,6 @@ Alternatively, you can raise an issue on our `GitHub <https://github.com/vllm-pr
         from vllm import LLM
 
         llm = LLM(model=...)  # Name or path of your model
-        output = llm.generate("Hello, my name is")
-        print(output)
-
-    To use model from www.modelscope.cn
-
-    .. code-block:: shell
-
-       $ export VLLM_USE_MODELSCOPE=True
-
-    .. code-block:: python
-
-        from vllm import LLM
-
-        llm = LLM(model=..., revision=..., trust_remote_code=True)  # Name or path of your model
         output = llm.generate("Hello, my name is")
         print(output)
 

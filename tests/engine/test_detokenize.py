@@ -5,9 +5,10 @@ from transformers import AutoTokenizer
 from vllm.transformers_utils.tokenizer import detokenize_incrementally
 
 TRUTH = [
-    "Hello here, this is a simple test",  # noqa: E501
-    "vLLM is a high-throughput and memory-efficient inference and serving engine for LLMs. It is designed to be used in production environments, where inference and serving",  # noqa: E501
-    "我很感谢你的热情"  # noqa: E501
+    # pylint: disable=line-too-long
+    "Hello here, this is a simple test",
+    "vLLM is a high-throughput and memory-efficient inference and serving engine for LLMs. It is designed to be used in production environments, where inference and serving",
+    "我很感谢你的热情"
 ]
 TOKENIZERS = [
     "facebook/opt-125m",
