@@ -53,6 +53,7 @@ class RotaryEmbedding(nn.Module):
         max_position_embeddings: int,
         base: int,
         is_neox_style: bool,
+        use_logn_attn: Optional[bool] = False,
     ) -> None:
         super().__init__()
         self.head_size = head_size
@@ -60,6 +61,9 @@ class RotaryEmbedding(nn.Module):
         self.max_position_embeddings = max_position_embeddings
         self.base = base
         self.is_neox_style = is_neox_style
+
+        # add use_logn_attn
+        self.use_logn_attn = use_logn_attn
 
         if self.use_logn_attn:
             logn_list = [
