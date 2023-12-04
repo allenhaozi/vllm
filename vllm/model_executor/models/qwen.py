@@ -127,12 +127,8 @@ class QWenAttention(nn.Module):
         q, k, v = qkv.chunk(chunks=3, dim=-1)
 
         # get the prompt origin token length
-        # input_metadata.seq_groups[0][1].prompt_token_length
-        origin_prompt_token_length = input_metadata.seq_groups[0][1].prompt_token_length
-        if isinstance(self.rotary_emb, DynamicNTKScalingRotaryEmbeddingQwen) and (
-            origin_prompt_token_length is not None and origin_prompt_token_length > 0
-        ):
-            q, k = self.rotary_emb(positions, q, k, origin_prompt_token_length)
+        if isinstance(self.rotary_emb, DynamicNTKScalingRotaryEmbeddingQwen):
+            q, k = self.rotary_emb(positions, q, k, input_metadata.origin_prompt_token_ids_length)
         else:
             # Apply rotary embedding to the query and key before passing them
             # to the attention op.

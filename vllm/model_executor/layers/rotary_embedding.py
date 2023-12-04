@@ -53,6 +53,7 @@ class RotaryEmbedding(nn.Module):
         max_position_embeddings: int,
         base: int,
         is_neox_style: bool,
+        use_logn_attn: Optional[bool] = False,
     ) -> None:
         super().__init__()
         self.head_size = head_size
@@ -61,6 +62,9 @@ class RotaryEmbedding(nn.Module):
         self.base = base
         self.is_neox_style = is_neox_style
 
+        # add use_logn_attn
+        self.use_logn_attn = use_logn_attn
+
         if self.use_logn_attn:
             logn_list = [
                 math.log(i, self.max_position_embeddings)
@@ -68,7 +72,7 @@ class RotaryEmbedding(nn.Module):
                 else 1
                 for i in range(1, 32768)
             ]
-            logn_tensor = torch.tensor(logn_list)[None, :, None]
+            logn_tensor = torch.tensor(logn_list)[None, :,None]
             self.register_buffer("logn_tensor", logn_tensor, persistent=False)
 
         cache = self._compute_cos_sin_cache()
@@ -381,7 +385,7 @@ class DynamicNTKScalingRotaryEmbeddingQwen(RotaryEmbedding):
         self.seq_length = seq_length
         self.true_seq_len_cache = 0
         self.ntk_alpha_cached = 0
-
+        self.dtype = torch.get_default_dtype()
         super().__init__(
             head_size,
             rotary_dim,
@@ -436,7 +440,9 @@ class DynamicNTKScalingRotaryEmbeddingQwen(RotaryEmbedding):
         cache = torch.cat((cos, sin), dim=-1)
 
         # NOTICE: make sure get the right default dtype
-        cache = cache.to(torch.get_default_dtype())
+        #cache = cache.to(torch.get_default_dtype())
+        cache = cache.to(self.dtype)
+        
         # TODO: Are concurrent requests conflicting?
         self.register_buffer("cos_sin_cache", cache, persistent=False)
         # set cache
@@ -445,12 +451,13 @@ class DynamicNTKScalingRotaryEmbeddingQwen(RotaryEmbedding):
 
     def get_ntk_alpha(self, true_seq_len):
         # in practice, true_seq_len * self.scaling_factor have a better effect
+        # math.log(true_seq_len * self.scaling_factor * 2 / self.seq_length, 2) + 1
         context_value = (
-            math.log(true_seq_len * self.scaling_factor * 2 / self.seq_length, 2) + 1
+            math.log(true_seq_len / self.seq_length, 2) + 1
         )
         ntk_alpha = 2 ** math.ceil(context_value) - 1
         ntk_alpha = max(ntk_alpha, 1)
-
+        #print(f"ntk_alpha:{ntk_alpha},true_seq_len:{true_seq_len},sql_length:{self.seq_length}")
         return ntk_alpha
 
     def forward(
@@ -466,6 +473,7 @@ class DynamicNTKScalingRotaryEmbeddingQwen(RotaryEmbedding):
         # update cos_sin_cache before compute new positional embedding.
         if true_seq_len > 0:
             self.update_compute_cos_sin_cache(true_seq_len)
+        
         ops.rotary_embedding(
             positions,
             query,
@@ -474,11 +482,13 @@ class DynamicNTKScalingRotaryEmbeddingQwen(RotaryEmbedding):
             self.cos_sin_cache,
             self.is_neox_style,
         )
-        seq_start = key.size(1) - query.size(1)
-        seq_end = key.size(1)
-        logn_tensor = self.logn_tensor[:, seq_start:seq_end].type_as(query)
-        query = query * logn_tensor.expand_as(query)
-
+        
+        if self.use_logn_attn:
+            seq_start = key.size(1) - query.size(1)
+            seq_end = key.size(1)
+            logn_tensor = self.logn_tensor[:, seq_start:seq_end,:].type_as(query)
+            query = query * logn_tensor.expand_as(query)
+        
         return query, key
 
 

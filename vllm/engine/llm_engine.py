@@ -295,7 +295,6 @@ class LLMEngine:
         seq_id = next(self.seq_counter)
         seq = Sequence(seq_id, prompt, prompt_token_ids, block_size)
 
-        sampling_params.prompt_token_length = len(prompt_token_ids)
         # Create the sequence group.
         seq_group = SequenceGroup(request_id, [seq], sampling_params, arrival_time)
 
