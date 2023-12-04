@@ -272,8 +272,11 @@ class ModelRunner:
         else:
             inputs = self._prepare_decode(seq_group_metadata_list)
             input_tokens, input_positions, input_metadata = inputs
+
         sampling_metadata = self._prepare_sample(seq_group_metadata_list,
                                                  input_metadata.prompt_lens)
+        
+        input_metadata.origin_prompt_token_ids_length =  seq_group_metadata_list[0].sampling_params.origin_prompt_token_ids_length
 
         # Execute the model.
         hidden_states = self.model(
