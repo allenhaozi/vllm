@@ -1,41 +1,50 @@
-import time
 import codecs
+import time
+from typing import AsyncGenerator, AsyncIterator, List, Optional, Union
+
 from fastapi import Request
-from typing import AsyncGenerator, AsyncIterator, Optional, List, Union
-from vllm.logger import init_logger
-from vllm.utils import random_uuid
+
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.protocol import (
-    ChatCompletionRequest, ChatCompletionResponse,
-    ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice,
-    ChatCompletionStreamResponse, ChatMessage, DeltaMessage, ErrorResponse,
-    UsageInfo)
+    ChatCompletionRequest,
+    ChatCompletionResponse,
+    ChatCompletionResponseChoice,
+    ChatCompletionResponseStreamChoice,
+    ChatCompletionStreamResponse,
+    ChatMessage,
+    DeltaMessage,
+    ErrorResponse,
+    UsageInfo,
+)
+from vllm.entrypoints.openai.serving_engine import LoRA, OpenAIServing
+from vllm.logger import init_logger
+from vllm.model_executor.guided_decoding import get_guided_decoding_logits_processor
 from vllm.outputs import RequestOutput
-from vllm.entrypoints.openai.serving_engine import OpenAIServing, LoRA
-from vllm.model_executor.guided_decoding import (
-    get_guided_decoding_logits_processor)
+from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
 
 
 class OpenAIServingChat(OpenAIServing):
 
-    def __init__(self,
-                 engine: AsyncLLMEngine,
-                 served_model: str,
-                 response_role: str,
-                 lora_modules: Optional[List[LoRA]] = None,
-                 chat_template=None):
-        super().__init__(engine=engine,
-                         served_model=served_model,
-                         lora_modules=lora_modules)
+    def __init__(
+        self,
+        engine: AsyncLLMEngine,
+        served_model: str,
+        response_role: str,
+        lora_modules: Optional[List[LoRA]] = None,
+        chat_template=None,
+    ):
+        super().__init__(
+            engine=engine, served_model=served_model, lora_modules=lora_modules
+        )
         self.response_role = response_role
         self._load_chat_template(chat_template)
 
+    # 返回值是了一个联合类型
     async def create_chat_completion(
         self, request: ChatCompletionRequest, raw_request: Request
-    ) -> Union[ErrorResponse, AsyncGenerator[str, None],
-               ChatCompletionResponse]:
+    ) -> Union[ErrorResponse, AsyncGenerator[str, None], ChatCompletionResponse]:
         """Completion API similar to OpenAI's API.
 
         See https://platform.openai.com/docs/api-reference/chat/create
@@ -50,43 +59,44 @@ class OpenAIServingChat(OpenAIServing):
             return error_check_ret
 
         try:
+            # 通过 chat_template 格式化 request.messages
             prompt = self.tokenizer.apply_chat_template(
                 conversation=request.messages,
                 tokenize=False,
-                add_generation_prompt=request.add_generation_prompt)
+                add_generation_prompt=request.add_generation_prompt,
+            )
         except Exception as e:
-            logger.error(
-                f"Error in applying chat template from request: {str(e)}")
+            logger.error(f"Error in applying chat template from request: {str(e)}")
             return self.create_error_response(str(e))
 
         request_id = f"cmpl-{random_uuid()}"
         try:
-            token_ids = self._validate_prompt_and_tokenize(request,
-                                                           prompt=prompt)
+            token_ids = self._validate_prompt_and_tokenize(request, prompt=prompt)
             sampling_params = request.to_sampling_params()
             lora_request = self._maybe_get_lora(request)
-            guided_decode_logits_processor = (
-                await get_guided_decoding_logits_processor(
-                    request, await self.engine.get_tokenizer()))
+            guided_decode_logits_processor = await get_guided_decoding_logits_processor(
+                request, await self.engine.get_tokenizer()
+            )
             if guided_decode_logits_processor:
                 if sampling_params.logits_processors is None:
                     sampling_params.logits_processors = []
-                sampling_params.logits_processors.append(
-                    guided_decode_logits_processor)
+                sampling_params.logits_processors.append(guided_decode_logits_processor)
         except ValueError as e:
             return self.create_error_response(str(e))
 
-        result_generator = self.engine.generate(prompt, sampling_params,
-                                                request_id, token_ids,
-                                                lora_request)
+        result_generator = self.engine.generate(
+            prompt, sampling_params, request_id, token_ids, lora_request
+        )
         # Streaming response
         if request.stream:
             return self.chat_completion_stream_generator(
-                request, result_generator, request_id)
+                request, result_generator, request_id
+            )
         else:
             try:
                 return await self.chat_completion_full_generator(
-                    request, raw_request, result_generator, request_id)
+                    request, raw_request, result_generator, request_id
+                )
             except ValueError as e:
                 # TODO: Use a vllm-specific Validation Error
                 return self.create_error_response(str(e))
@@ -98,8 +108,10 @@ class OpenAIServingChat(OpenAIServing):
             return request.messages[-1]["role"]
 
     async def chat_completion_stream_generator(
-            self, request: ChatCompletionRequest,
-            result_generator: AsyncIterator[RequestOutput], request_id: str
+        self,
+        request: ChatCompletionRequest,
+        result_generator: AsyncIterator[RequestOutput],
+        request_id: str,
     ) -> Union[ErrorResponse, AsyncGenerator[str, None]]:
 
         model_name = request.model
@@ -126,13 +138,15 @@ class OpenAIServingChat(OpenAIServing):
                             index=i,
                             delta=DeltaMessage(role=role),
                             logprobs=None,
-                            finish_reason=None)
+                            finish_reason=None,
+                        )
                         chunk = ChatCompletionStreamResponse(
                             id=request_id,
                             object=chunk_object_type,
                             created=created_time,
                             choices=[choice_data],
-                            model=model_name)
+                            model=model_name,
+                        )
                         data = chunk.model_dump_json(exclude_unset=True)
                         yield f"data: {data}\n\n"
 
@@ -140,30 +154,30 @@ class OpenAIServingChat(OpenAIServing):
                     # last message
                     if request.echo:
                         last_msg_content = ""
-                        if request.messages and isinstance(
-                                request.messages,
-                                list) and request.messages[-1].get(
-                                    "content") and request.messages[-1].get(
-                                        "role") == role:
+                        if (
+                            request.messages
+                            and isinstance(request.messages, list)
+                            and request.messages[-1].get("content")
+                            and request.messages[-1].get("role") == role
+                        ):
                             last_msg_content = request.messages[-1]["content"]
 
                         if last_msg_content:
                             for i in range(request.n):
-                                choice_data = (
-                                    ChatCompletionResponseStreamChoice(
-                                        index=i,
-                                        delta=DeltaMessage(
-                                            content=last_msg_content),
-                                        finish_reason=None))
+                                choice_data = ChatCompletionResponseStreamChoice(
+                                    index=i,
+                                    delta=DeltaMessage(content=last_msg_content),
+                                    finish_reason=None,
+                                )
                                 chunk = ChatCompletionStreamResponse(
                                     id=request_id,
                                     object=chunk_object_type,
                                     created=created_time,
                                     choices=[choice_data],
                                     logprobs=None,
-                                    model=model_name)
-                                data = chunk.model_dump_json(
-                                    exclude_unset=True)
+                                    model=model_name,
+                                )
+                                data = chunk.model_dump_json(exclude_unset=True)
                                 yield f"data: {data}\n\n"
                     first_iteration = False
 
@@ -173,9 +187,12 @@ class OpenAIServingChat(OpenAIServing):
                     if finish_reason_sent[i]:
                         continue
 
-                    delta_token_ids = output.token_ids[previous_num_tokens[i]:]
-                    top_logprobs = output.logprobs[
-                        previous_num_tokens[i]:] if output.logprobs else None
+                    delta_token_ids = output.token_ids[previous_num_tokens[i] :]
+                    top_logprobs = (
+                        output.logprobs[previous_num_tokens[i] :]
+                        if output.logprobs
+                        else None
+                    )
 
                     if request.logprobs:
                         logprobs = self._create_logprobs(
@@ -187,7 +204,7 @@ class OpenAIServingChat(OpenAIServing):
                     else:
                         logprobs = None
 
-                    delta_text = output.text[len(previous_texts[i]):]
+                    delta_text = output.text[len(previous_texts[i]) :]
                     previous_texts[i] = output.text
                     previous_num_tokens[i] = len(output.token_ids)
                     if output.finish_reason is None:
@@ -196,13 +213,15 @@ class OpenAIServingChat(OpenAIServing):
                             index=i,
                             delta=DeltaMessage(content=delta_text),
                             logprobs=logprobs,
-                            finish_reason=None)
+                            finish_reason=None,
+                        )
                         chunk = ChatCompletionStreamResponse(
                             id=request_id,
                             object=chunk_object_type,
                             created=created_time,
                             choices=[choice_data],
-                            model=model_name)
+                            model=model_name,
+                        )
                         data = chunk.model_dump_json(exclude_unset=True)
                         yield f"data: {data}\n\n"
                     else:
@@ -211,24 +230,26 @@ class OpenAIServingChat(OpenAIServing):
                         final_usage = UsageInfo(
                             prompt_tokens=prompt_tokens,
                             completion_tokens=previous_num_tokens[i],
-                            total_tokens=prompt_tokens +
-                            previous_num_tokens[i],
+                            total_tokens=prompt_tokens + previous_num_tokens[i],
                         )
                         choice_data = ChatCompletionResponseStreamChoice(
                             index=i,
                             delta=DeltaMessage(content=delta_text),
                             logprobs=logprobs,
-                            finish_reason=output.finish_reason)
+                            finish_reason=output.finish_reason,
+                        )
                         chunk = ChatCompletionStreamResponse(
                             id=request_id,
                             object=chunk_object_type,
                             created=created_time,
                             choices=[choice_data],
-                            model=model_name)
+                            model=model_name,
+                        )
                         if final_usage is not None:
                             chunk.usage = final_usage
-                        data = chunk.model_dump_json(exclude_unset=True,
-                                                     exclude_none=True)
+                        data = chunk.model_dump_json(
+                            exclude_unset=True, exclude_none=True
+                        )
                         yield f"data: {data}\n\n"
                         finish_reason_sent[i] = True
         except ValueError as e:
@@ -239,9 +260,12 @@ class OpenAIServingChat(OpenAIServing):
         yield "data: [DONE]\n\n"
 
     async def chat_completion_full_generator(
-            self, request: ChatCompletionRequest, raw_request: Request,
-            result_generator: AsyncIterator[RequestOutput],
-            request_id: str) -> Union[ErrorResponse, ChatCompletionResponse]:
+        self,
+        request: ChatCompletionRequest,
+        raw_request: Request,
+        result_generator: AsyncIterator[RequestOutput],
+        request_id: str,
+    ) -> Union[ErrorResponse, ChatCompletionResponse]:
 
         model_name = request.model
         created_time = int(time.time())
@@ -281,10 +305,12 @@ class OpenAIServingChat(OpenAIServing):
 
         if request.echo:
             last_msg_content = ""
-            if request.messages and isinstance(
-                    request.messages, list) and request.messages[-1].get(
-                        "content") and request.messages[-1].get(
-                            "role") == role:
+            if (
+                request.messages
+                and isinstance(request.messages, list)
+                and request.messages[-1].get("content")
+                and request.messages[-1].get("role") == role
+            ):
                 last_msg_content = request.messages[-1]["content"]
 
             for choice in choices:
@@ -293,7 +319,8 @@ class OpenAIServingChat(OpenAIServing):
 
         num_prompt_tokens = len(final_res.prompt_token_ids)
         num_generated_tokens = sum(
-            len(output.token_ids) for output in final_res.outputs)
+            len(output.token_ids) for output in final_res.outputs
+        )
         usage = UsageInfo(
             prompt_tokens=num_prompt_tokens,
             completion_tokens=num_generated_tokens,
@@ -318,15 +345,13 @@ class OpenAIServingChat(OpenAIServing):
                 # If opening a file fails, set chat template to be args to
                 # ensure we decode so our escape are interpreted correctly
                 self.tokenizer.chat_template = codecs.decode(
-                    chat_template, "unicode_escape")
+                    chat_template, "unicode_escape"
+                )
 
             logger.info(
                 f"Using supplied chat template:\n{self.tokenizer.chat_template}"
             )
         elif self.tokenizer.chat_template is not None:
-            logger.info(
-                f"Using default chat template:\n{self.tokenizer.chat_template}"
-            )
+            logger.info(f"Using default chat template:\n{self.tokenizer.chat_template}")
         else:
-            logger.warning(
-                "No chat template provided. Chat API will not work.")
+            logger.warning("No chat template provided. Chat API will not work.")

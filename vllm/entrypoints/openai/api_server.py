@@ -220,8 +220,14 @@ async def show_version():
     return JSONResponse(content=ver)
 
 
+#  处理请求的异步函数
+# 该函数接受一个ChatCompletionRequest对象和一个Request对象作为参数
+# request 是一个类型为 ChatCompletionRequest 的对象，通常包含客户端请求的参数
+# raw_request 是原始的FastAPI Request 对象，提供了对请求的低级别访问
 @app.post("/v1/chat/completions")
 async def create_chat_completion(request: ChatCompletionRequest, raw_request: Request):
+    # 这行代码调用名为 openai_serving_chat.create_chat_completion 的异步函数，传入处理请求所需的数据
+    # 假设这个函数使用OpenAI API或其他类似的API生成聊天对话的响应。
     generator = await openai_serving_chat.create_chat_completion(request, raw_request)
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(), status_code=generator.code)
@@ -303,6 +309,9 @@ if __name__ == "__main__":
     openai_serving_completion = OpenAIServingCompletion(
         engine, served_model, args.lora_modules
     )
+
+    # 将全局变量root_path设置为命令行参数args.root_path的值
+    # 这通常是应用的基础路径，用于处理相对路径和静态文件
 
     app.root_path = args.root_path
     # 启动FastAPI应用，使用uvicorn作为异步Web服务器
