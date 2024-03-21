@@ -220,13 +220,17 @@ class Scheduler:
                         f"Input prompt ({num_prompt_tokens} tokens) is too long"
                         f" and exceeds limit of {self.prompt_limit}"
                     )
+                    # 更改状态为 FINISHED_IGNORED
                     for seq in waiting_seqs:
                         seq.status = SequenceStatus.FINISHED_IGNORED
+                    # 将这个 SequenceGroup 加入到忽略队列
                     ignored_seq_groups.append(seq_group)
+                    # 从等待队列中移除
                     self.waiting.popleft()
                     continue
 
                 # If the sequence group cannot be allocated, stop.
+                # 判断是否可以分配资源
                 can_allocate = self.block_manager.can_allocate(seq_group)
                 if can_allocate == AllocStatus.LATER:
                     break
@@ -235,9 +239,12 @@ class Scheduler:
                         f"Input prompt ({num_prompt_tokens} tokens) is too long"
                         f" and exceeds the capacity of block_manager"
                     )
+                    # 更改状态为 FINISHED_IGNORED
                     for seq in waiting_seqs:
                         seq.status = SequenceStatus.FINISHED_IGNORED
+                    # 将这个 SequenceGroup 加入到忽略队列
                     ignored_seq_groups.append(seq_group)
+                    # 从等待队列中移除
                     self.waiting.popleft()
                     continue
 
@@ -280,10 +287,17 @@ class Scheduler:
 
                 if lora_int_id > 0:
                     curr_loras.add(lora_int_id)
+                # 队列的左侧移除元素
+                # 从waiting队列中移除
                 self.waiting.popleft()
+                # 为当前 SequenceGroup 分配资源
+                # 并将状态设置为 RUNNING
                 self._allocate(seq_group)
+                # 加入到 running 队列
                 self.running.append(seq_group)
                 num_curr_seqs += num_new_seqs
+                # 标记为已经分配
+                # 或者叫 已调度
                 scheduled.append(seq_group)
 
             self.waiting.extendleft(leftover_waiting_sequences)
