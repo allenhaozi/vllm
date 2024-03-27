@@ -302,6 +302,8 @@ class Scheduler:
 
             self.waiting.extendleft(leftover_waiting_sequences)
 
+            # 如果包含 ignored_seq_groups 或者 scheduled
+            # 则返回
             if scheduled or ignored_seq_groups:
                 scheduler_outputs = SchedulerOutputs(
                     scheduled_seq_groups=scheduled,
@@ -421,6 +423,7 @@ class Scheduler:
 
         # Create input data structures.
         seq_group_metadata_list: List[SequenceGroupMetadata] = []
+        # 获取已被调度的 SequenceGroup
         for seq_group in scheduler_outputs.scheduled_seq_groups:
             seq_group.maybe_set_first_scheduled_time(now)
 
@@ -433,6 +436,10 @@ class Scheduler:
                 block_tables[seq_id] = self.block_manager.get_block_table(seq)
                 self.block_manager.access_all_blocks_in_seq(seq, now)
 
+            # 创建 SequenceGroupMetadata
+            # SequenceGroup 和 一个 Request 是一一对应的
+            # 一个 SequenceGroup 包含了一个请求的完整语义
+            #
             seq_group_metadata = SequenceGroupMetadata(
                 request_id=seq_group.request_id,
                 is_prompt=scheduler_outputs.prompt_run,

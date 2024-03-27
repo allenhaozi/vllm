@@ -1,27 +1,31 @@
+import asyncio
 import enum
+import gc
 import os
 import socket
 import subprocess
 import uuid
-import gc
+import warnings
+from collections import OrderedDict
+from functools import partial
 from platform import uname
-from typing import List, Tuple, Union
-from packaging.version import parse, Version
+from typing import (
+    Any,
+    Awaitable,
+    Callable,
+    Hashable,
+    List,
+    Optional,
+    Tuple,
+    TypeVar,
+    Union,
+)
 
 import psutil
 import torch
-import asyncio
-from functools import partial
-from typing import (
-    Awaitable,
-    Callable,
-    TypeVar,
-)
-from collections import OrderedDict
-from typing import Any, Hashable, Optional
+from packaging.version import Version, parse
 
 from vllm.logger import init_logger
-import warnings
 
 T = TypeVar("T")
 logger = init_logger(__name__)
@@ -134,8 +138,7 @@ def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     # the Neuron-X backend does not have the `cuda_utils` module.
     from vllm._C import cuda_utils
 
-    max_shared_mem = (
-        cuda_utils.get_max_shared_memory_per_block_device_attribute(gpu))
+    max_shared_mem = cuda_utils.get_max_shared_memory_per_block_device_attribute(gpu)
     # value 0 will cause MAX_SEQ_LEN become negative and test_attention.py
     # will fail
     assert max_shared_mem > 0, "max_shared_mem can not be zero"
@@ -156,6 +159,10 @@ def in_wsl() -> bool:
     return "microsoft" in " ".join(uname()).lower()
 
 
+# 这段代码定义了一个名为 make_async 的装饰器，
+# 它将一个可能会阻塞的同步函数转换为异步函数。
+# 这个装饰器使用了 asyncio 库来运行函数在一个 executor 线程中，
+# 以确保该函数不会阻塞事件循环。
 def make_async(func: Callable[..., T]) -> Callable[..., Awaitable[T]]:
     """Take a blocking function, and run it on in an executor thread.
 
@@ -200,7 +207,8 @@ def get_ip() -> str:
     warnings.warn(
         "Failed to get the IP address, using 0.0.0.0 by default."
         "The value can be set by the environment variable HOST_IP.",
-        stacklevel=2)
+        stacklevel=2,
+    )
     return "0.0.0.0"
 
 
@@ -226,18 +234,20 @@ def set_cuda_visible_devices(device_ids: List[int]) -> None:
 
 
 def get_nvcc_cuda_version() -> Optional[Version]:
-    cuda_home = os.environ.get('CUDA_HOME')
+    cuda_home = os.environ.get("CUDA_HOME")
     if not cuda_home:
-        cuda_home = '/usr/local/cuda'
-        if os.path.isfile(cuda_home + '/bin/nvcc'):
-            logger.info(f'CUDA_HOME is not found in the environment. '
-                        f'Using {cuda_home} as CUDA_HOME.')
+        cuda_home = "/usr/local/cuda"
+        if os.path.isfile(cuda_home + "/bin/nvcc"):
+            logger.info(
+                f"CUDA_HOME is not found in the environment. "
+                f"Using {cuda_home} as CUDA_HOME."
+            )
         else:
-            logger.warning(
-                f'Not found nvcc in {cuda_home}. Skip cuda version check!')
+            logger.warning(f"Not found nvcc in {cuda_home}. Skip cuda version check!")
             return None
-    nvcc_output = subprocess.check_output([cuda_home + "/bin/nvcc", "-V"],
-                                          universal_newlines=True)
+    nvcc_output = subprocess.check_output(
+        [cuda_home + "/bin/nvcc", "-V"], universal_newlines=True
+    )
     output = nvcc_output.split()
     release_idx = output.index("release") + 1
     nvcc_cuda_version = parse(output[release_idx].split(",")[0])
@@ -254,10 +264,11 @@ def _generate_random_fp8_e5m2(
     # to generate random data for fp8 data.
     # For example, s.11111.00 in fp8e5m2 format represents Inf.
     #     | E4M3        | E5M2
-    #-----|-------------|-------------------
+    # -----|-------------|-------------------
     # Inf | N/A         | s.11111.00
     # NaN | s.1111.111  | s.11111.{01,10,11}
     from vllm._C import cache_ops
+
     tensor_tmp = torch.empty_like(tensor, dtype=torch.float16)
     tensor_tmp.uniform_(low, high)
     cache_ops.convert_fp8_e5m2(tensor_tmp, tensor)
@@ -303,31 +314,27 @@ def create_kv_caches_with_random(
     key_cache_shape = (num_blocks, num_heads, head_size // x, block_size, x)
     key_caches = []
     for _ in range(num_layers):
-        key_cache = torch.empty(size=key_cache_shape,
-                                dtype=torch_dtype,
-                                device=device)
-        if cache_dtype == 'fp8_e5m2':
+        key_cache = torch.empty(size=key_cache_shape, dtype=torch_dtype, device=device)
+        if cache_dtype == "fp8_e5m2":
             _generate_random_fp8_e5m2(key_cache, -scale, scale)
         elif torch_dtype in [torch.half, torch.bfloat16, torch.float]:
             key_cache.uniform_(-scale, scale)
         else:
-            raise ValueError(
-                f"Does not support key cache of type {cache_dtype}")
+            raise ValueError(f"Does not support key cache of type {cache_dtype}")
         key_caches.append(key_cache)
 
     value_cache_shape = (num_blocks, num_heads, head_size, block_size)
     value_caches = []
     for _ in range(num_layers):
-        value_cache = torch.empty(size=value_cache_shape,
-                                  dtype=torch_dtype,
-                                  device=device)
-        if cache_dtype == 'fp8_e5m2':
+        value_cache = torch.empty(
+            size=value_cache_shape, dtype=torch_dtype, device=device
+        )
+        if cache_dtype == "fp8_e5m2":
             _generate_random_fp8_e5m2(value_cache, -scale, scale)
         elif torch_dtype in [torch.half, torch.bfloat16, torch.float]:
             value_cache.uniform_(-scale, scale)
         else:
-            raise ValueError(
-                f"Does not support value cache of type {cache_dtype}")
+            raise ValueError(f"Does not support value cache of type {cache_dtype}")
         value_caches.append(value_cache)
     return key_caches, value_caches
 

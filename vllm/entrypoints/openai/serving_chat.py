@@ -69,8 +69,11 @@ class OpenAIServingChat(OpenAIServing):
             logger.error(f"Error in applying chat template from request: {str(e)}")
             return self.create_error_response(str(e))
 
+        # 创建一个请求的UUID
         request_id = f"cmpl-{random_uuid()}"
         try:
+            # 检查长度是否溢出
+            # 将 prompt 转换为 token_ids
             token_ids = self._validate_prompt_and_tokenize(request, prompt=prompt)
             sampling_params = request.to_sampling_params()
             lora_request = self._maybe_get_lora(request)
